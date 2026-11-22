@@ -1,0 +1,151 @@
+# Dev build for the MCP: Windows x64 Release with the control socket and editor ON.
+# Private use only; never ship this build to players (see README-MCP.md).
+name: Build control-socket client
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GIT_CONFIG_COUNT: 2
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: main
+  GIT_CONFIG_KEY_1: advice.detachedHead
+  GIT_CONFIG_VALUE_1: 'false'
+
+jobs:
+  windows-editor:
+    name: Windows x64 Release, editor ON
+    # The images by name, as in ci.yml.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup .NET 10
+        id: dotnet
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Activate Visual Studio developer environment
+        shell: pwsh
+        run: |
+          # Loads vcvars64.bat and passes every variable it changes on to the
+          # following steps.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) {
+            throw "No Visual Studio installation with the x64 C++ tools found."
+          }
+          $vcvars = Join-Path $installation "VC\Auxiliary\Build\vcvars64.bat"
+          # vcvars64.bat looks for vswhere.exe on PATH itself.
+          $env:PATH = "$(Split-Path $vswhere);$env:PATH"
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          cmd /c "`"$vcvars`" >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$' -and $before[$Matches[1]] -ne $Matches[2]) {
+              "$($Matches[1])=$($Matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "vcvars64.bat failed."
+          }
+
+      - name: Cache dependencies
+        # Named as in ci.yml, after what picks the files.
+        uses: actions/cache@v6
+        with:
+          path: |
+            # Downloaded sources only: ninja recompiles restored *-build folders.
+            out/build/fork-ci-windows/_deps/*-src
+            out/build/fork-ci-windows/_deps/*-subbuild
+            .nuget
+          key: fork-windows-x64-dep-sources-${{ steps.dotnet.outputs.dotnet-version }}-${{ hashFiles('CMakeLists.txt', 'cmake/patches/**', 'cmake/ApplyGitPatch.cmake', 'cmake/UnpackArchive.cmake', 'ClientLibrary/**/*.csproj', 'ClientLibrary/**/*.props') }}
+          restore-keys: fork-windows-x64-dep-sources-
+
+      - name: Identify vcpkg toolchain
+        id: vcpkg
+        shell: pwsh
+        run: ./scripts/ci_vcpkg_cache_key.ps1
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v6
+        with:
+          path: |
+            C:/vcpkg/installed
+            C:/vcpkg/packages
+            ~/AppData/Local/vcpkg/archives
+          key: vcpkg-windows-x64-v2-${{ steps.vcpkg.outputs.identity }}-${{ hashFiles('vcpkg.json', 'toolchain-x64.cmake', 'cmake/triplets/**') }}
+          restore-keys: vcpkg-windows-x64-v2-
+
+      - name: Configure CMake
+        run: >
+          python scripts/ci_warnings.py report
+          cmake --preset windows-x64
+          -B out/build/fork-ci-windows
+          -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+          -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain-x64.cmake
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+          -DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/cmake/triplets
+          -DVCPKG_INSTALLED_DIR=C:/vcpkg/installed
+          -DVCPKG_MANIFEST_MODE=ON
+          -DENABLE_EDITOR=ON
+          -DENABLE_CONTROL_SOCKET=ON
+          -DMU_WARNINGS_AS_ERRORS=OFF
+          -DMU_ENABLE_SHADER_COMPILATION=ON
+          -DGLSLANG_EXE=C:/vcpkg/installed/x64-windows/tools/glslang/glslangValidator.exe
+          -DSPIRV_CROSS_EXE=C:/vcpkg/installed/x64-windows/tools/spirv-cross/spirv-cross.exe
+          -DDXC_EXE=C:/vcpkg/installed/x64-windows/tools/directx-dxc/dxc.exe
+          -DMU_COPY_RUNTIME_ASSETS=OFF
+          -DBUILD_TESTING=ON
+
+      - name: Build
+        id: build
+        run: >
+          python scripts/ci_warnings.py report
+          cmake --build out/build/fork-ci-windows --config Release
+
+      - name: Test
+        shell: pwsh
+        run: |
+          # Only this fork's control-socket tests ([control] tag). Upstream MuMain tests are not run here.
+          # doctest cases are registered with ctest by doctest_discover_tests.
+          ctest --test-dir out/build/fork-ci-windows -C Release -R "\[control\]" --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "ctest failed with exit code $LASTEXITCODE" }
+
+      - name: Package runtime
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ARTIFACT_PASS: ${{ secrets.ARTIFACT_PASS }}
+        run: |
+          $dir = "out/build/fork-ci-windows/src/Release"
+          if (-not (Test-Path "$dir/Main.exe")) { throw "Main.exe not found in $dir" }
+          if (-not $env:ARTIFACT_PASS) { throw "ARTIFACT_PASS secret is not set" }
+          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue).Source
+          if (-not $sevenZip) { $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe" }
+          if (-not (Test-Path $sevenZip)) { throw "7z not found" }
+          # -mhe=on also encrypts file names. The passphrase stays in the env, not on the command line in logs.
+          & $sevenZip a -t7z "-p$env:ARTIFACT_PASS" -mhe=on MuMainMCP-windows-x64-control-socket.7z "$dir\*"
+          if ($LASTEXITCODE -ne 0) { throw "7z failed with exit code $LASTEXITCODE" }
+
+      - name: Upload build
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: MuMainMCP-windows-x64-control-socket
+          path: MuMainMCP-windows-x64-control-socket.7z
+          retention-days: 1
+          if-no-files-found: error

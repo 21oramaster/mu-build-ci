@@ -1,0 +1,77 @@
+#include "ItemGridGeometry.h"
+
+#include <cmath>
+
+namespace UI::Items
+{
+GridGeometry::GridGeometry(float left, float top, float pitchX, float pitchY, int columns, int rows)
+    : m_Left(left), m_Top(top), m_PitchX(pitchX > 0.f ? pitchX : DefaultPitch),
+      m_PitchY(pitchY > 0.f ? pitchY : DefaultPitch), m_Columns(columns), m_Rows(rows)
+{
+}
+
+bool GridGeometry::Contains(float x, float y) const
+{
+    const GridRect box = Bounds();
+    return x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height;
+}
+
+bool GridGeometry::CellAt(float x, float y, int& column, int& row) const
+{
+    if (!Contains(x, y))
+        return false;
+    column = static_cast<int>((x - m_Left) / m_PitchX);
+    row = static_cast<int>((y - m_Top) / m_PitchY);
+    if (column >= m_Columns)
+        column = m_Columns - 1;
+    if (row >= m_Rows)
+        row = m_Rows - 1;
+    return true;
+}
+
+void GridGeometry::CellOf(float x, float y, int& column, int& row) const
+{
+    if (CellAt(x, y, column, row))
+        return;
+    const float dx = x - m_Left;
+    const float dy = y - m_Top;
+    column = static_cast<int>(dx / m_PitchX) - (dx < 0.f ? 1 : 0);
+    row = static_cast<int>(dy / m_PitchY) - (dy < 0.f ? 1 : 0);
+}
+
+bool GridGeometry::HasCell(int column, int row) const
+{
+    return column >= 0 && column < m_Columns && row >= 0 && row < m_Rows;
+}
+
+bool GridGeometry::ItemCellAt(float left, float top, int& column, int& row) const
+{
+    ItemCellOf(left, top, column, row);
+    return HasCell(column, row);
+}
+
+void GridGeometry::ItemCellOf(float left, float top, int& column, int& row) const
+{
+    CellOf(left + m_PitchX / 2.f, top + m_PitchY / 2.f, column, row);
+}
+
+GridRect GridGeometry::CellsRect(int column, int row, int width, int height) const
+{
+    return {m_Left + column * m_PitchX, m_Top + row * m_PitchY, width * m_PitchX, height * m_PitchY};
+}
+
+void AnchoredTopLeft(float pointerX, float pointerY, const PickupAnchor& anchor, float pitchX, float pitchY,
+                     int& left, int& top)
+{
+    left = static_cast<int>(std::lround(pointerX - anchor.column * pitchX));
+    top = static_cast<int>(std::lround(pointerY - anchor.row * pitchY));
+}
+
+HeldItemPlace PlaceHeldItem(const GridGeometry& grid, float pointerX, float pointerY, const PickupAnchor& anchor)
+{
+    HeldItemPlace place;
+    AnchoredTopLeft(pointerX, pointerY, anchor, grid.PitchX(), grid.PitchY(), place.left, place.top);
+    grid.ItemCellOf(static_cast<float>(place.left), static_cast<float>(place.top), place.column, place.row);
+    return place;
+}
+} // namespace UI::Items
