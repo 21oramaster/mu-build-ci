@@ -6,6 +6,7 @@
 #include "App/Control/ControlRules.h"
 #include "App/Control/ControlState.h"
 #include "App/Control/ControlTargets.h"
+#include "Character/CharacterManager.h"
 #include "Core/Text/Utf8.h"
 #include "Engine/AI/ZzzAI.h"
 #include "Engine/Object/ZzzCharacter.h"
